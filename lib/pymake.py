@@ -10,6 +10,7 @@ import threading
 import math
 import subprocess
 import logging
+import optparse
 
 
 LOG = logging.getLogger(__name__)
@@ -164,7 +165,6 @@ def make_req(trgt, rules):
 class Req():
     """The base class for all requirements.
 
-    TODO: Make a self.err_event
     """
 
     instances = {}
@@ -232,7 +232,7 @@ class FileReq(Req):
         """
         return self.last_update()
 
-    def run(self, *args, **kwargs):
+    def run(self, **kwargs):
         """Ensure that *self.trgt* exists."""
         if not self.trgt_exists():
             self.err_event.set()
@@ -267,10 +267,6 @@ class HierReq(Req):
         super(HierReq, self).__init__(trgt)
         self.requires = requires
         self.uptodate = False
-        # Doesn't this mean uptodate is getting checked two
-        # or more times?  Once for construction, and
-        # then once every time it's called recursively?
-        # TODO
         self.run_lock = threading.Lock()
 
     def __repr__(self):
@@ -284,7 +280,7 @@ class HierReq(Req):
         req_strings = []
         for req in self.requires:
             for line in req.formatted().split('\n'):
-                 req_strings += ["    {}".format(line)]
+                req_strings += ["    {}".format(line)]
         if req_strings:
             out_string += '\n'.join(["\n  |REQUIRES|"] + req_strings)
         return out_string
@@ -336,19 +332,17 @@ class HierReq(Req):
             raise ValueError(("Somehow the up-to-date status of {self!s} "
                               "cannot be determined.").format(self=self))
 
-    def do(self, *args, **kwargs):
+    def do(self, **kwargs):
         """Execute the work defined for the requirement.""" 
         raise NotImplementedError("do() has not been implemented "
                                   "for this class, which is therefore not "
                                   "a functioning HierReq subclass.")
 
-    def run(self, *args, err_event=None, **kwargs):
+    def run(self, err_event=None, **kwargs):
         """Run, recursively, the requirement and all of its prerequisites.
 
         Requirements which are already up-to-date are not run and neither are
         their prerequisites.
-
-        TODO: This method is clearly far too large!
 
         """
         self.run_lock.acquire()
@@ -366,8 +360,7 @@ class HierReq(Req):
                 LOG.debug("running all preqs of {self!s}".format(self=self))
                 preq_threads = []
                 for preq in self.requires:
-                    thread = threading.Thread(target=preq.run,
-                                              args=args, kwargs=kwargs)
+                    thread = threading.Thread(target=preq.run, kwargs=kwargs)
                     preq_threads += [thread]
                     thread.start()
                 for preq, thread in zip(self.requires, preq_threads):
@@ -379,7 +372,7 @@ class HierReq(Req):
                         self.run_lock.release()
                         return
         LOG.debug("calling {self!s}.do()".format(self=self))
-        self.do(*args, **kwargs)
+        self.do(**kwargs)
         self.done = True
         if self.err_event.is_set():
             LOG.critical("{self!s} had an error; exiting".format(self=self))
@@ -417,7 +410,7 @@ class TaskReq(HierReq, FileReq):
         return out_string
 
 
-    def do(self, *args, execute=True, **kwargs):
+    def do(self, execute=True, **kwargs):
         """Print and execute the recipe."""
         if self.order_only and self.trgt_exists():
             LOG.debug("order-only requirement; will not be executed")
@@ -447,11 +440,83 @@ class DummyReq(HierReq):
     def last_update(self):
         return float('nan')
 
-    def do(self, *args, verbose=True, **kwargs):
+    def do(self, **kwargs):
         LOG.info("finished {self.trgt!r}".format(self=self))
 
 
-def main():
+def make(trgt, rules, env={}, **kwargs):
+    """Construct the dependency graph and run it."""
+    for rule in rules:
+        rule.update_env(env)
+    root_req = make_req(trgt, rules)
+    root_req.check_uptodate()
+    root_req.run(**kwargs)
+
+
+def maker(rules):
+    """TODO"""
+    # Name the logger after the calling module
+    import __main__
+    global LOG
+    LOG = logging.getLogger(__main__.__file__)
+
+    usage = "usage: %prog [options] [TARGET]"
+    parser = optparse.OptionParser(usage=usage)
+    parser.add_option("-q", "--quiet", action="store_const",
+                      const=0, dest="verbose",
+                      help=("don't print recipes. "
+                            "DEFAULT: print recipes"))
+    parser.add_option("-v", "--verbose", action="count",
+                      dest="verbose", default=1,
+                      help=("print recipes. "
+                            "Increment the logging level by 1. "
+                            "DEFAULT: verbosity level 1 ('INFO')"))
+    parser.add_option("-n", "--dry", action="store_false",
+                      dest="execute", default=True,
+                      help=("Dry run.  Don't execute the recipes. "
+                            "DEFAULT: execute recipes"))
+    parser.add_option("-s", "--series", "--not-parallel",
+                      action="store_false", dest="parallel", default=True,
+                      help=("execute the recipes in series. "
+                            "DEFAULT: parallel"))
+    parser.add_option("-V", "--var", "--additional-var", dest="env_items",
+                      default=[], action="append",
+                      nargs=2, metavar="[KEY] [VALUE]",
+                      help=("add the desired variable to the environment. "
+                            "Additional variables can be passed with "
+                            "more '-V' flags. Variables passed in this "
+                            "fasion override variables defined in any other "
+                            "way"))
+    parser.add_option("-d", "--debug", dest="debug",
+                      default=False, action="store_true",
+                      help=("display full debug messages with headers. "
+                            "DEFAULT: False"))
+    opts, args = parser.parse_args()
+
+    if opts.debug:
+        logging.basicConfig(level=logging.DEBUG, format=("(%(threadName)s:"
+                                                         "%(name)s:"
+                                                         "%(levelname)s:"
+                                                         "%(asctime)s\t"
+                                                         "%(message)s"))
+    else:
+        logging.basicConfig(level=[logging.ERROR,
+                                   logging.INFO,
+                                   logging.DEBUG][opts.verbose],
+                            format="%(message)s")
+
+    if len(args) == 1:
+        target = args[0]
+    elif len(args) == 0:
+        # If no target specified, use the first target.  This will not take
+        # into account environmental variables passed with the '-V' flag.
+        target = rules[0].trgt_pattern
+    else:
+        ValueError("Wrong number of positional arguments passed to pymake.")
+    make(target, rules, env=dict(opts.env_items), execute=opts.execute)
+
+
+def test():
     logging.basicConfig(level=logging.DEBUG,
                         format=("(%(threadName)s):"
                                 "%(levelname)s\t"
@@ -469,4 +534,4 @@ def main():
     pass
 
 if __name__ == '__main__':
-    main()
+    test()
