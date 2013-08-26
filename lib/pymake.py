@@ -22,11 +22,12 @@ class Rule():
     Defines the target, prerequisites, and rules for going from the latter
     to the former.
 
+    >>> # a new rule describing how to go from a tsv ([name].tsv)
+    >>> # to a txt file ([name].txt).
     >>> r = Rule(trgt="(.*).{txt_exten}",
     ...          preqs=["{0}.{tsv_exten}"],
     ...          recipe="./tsv2txt {preqs[0]} > {trgt}",
     ...          txt_exten="txt", tsv_exten="tsv")
-    >>> # a new rule describing how to go from a tsv to a txt file
 
     """
 
@@ -34,9 +35,11 @@ class Rule():
         """Create a new Rule object.
 
         *trgt* - a regex pattern which matches applicable targets
-        *preqs* - [optional] a list of str.format() style prerequisite templates
+        *preqs* - [optional] a list of str.format() style prerequisites
+                  templates
         *recipe* - [optional] a str.format() style recipe (shell commands)
-        *order_only* - should the target be updated when prerequisites are newer.
+        *order_only* - should the target be updated when prerequisites are
+                       newer.
         *env* - additional variables available to templates
 
         """
@@ -68,7 +71,7 @@ class Rule():
         if match is not None:
             return match.groups()
         else:
-            raise ValueError("{trgt} does not match {ptrn}".\
+            raise ValueError("{ptrn} does not match {trgt}".\
                              format(trgt=trgt, ptrn=pattern))
 
     def applies(self, trgt):
@@ -152,10 +155,12 @@ def make_req(trgt, rules):
     """
     rule, remaining = extract_rule(trgt, rules)
     if rule:
-        requires = [make_req(preq, remaining) for preq in rule.get_preqs(trgt)]
+        requires = [make_req(preq, remaining)
+                    for preq in rule.get_preqs(trgt)]
         recipe = rule.get_recipe(trgt)
         if recipe:
-            return TaskReq(trgt, requires, recipe, order_only=rule.order_only)
+            return TaskReq(trgt, requires, recipe,
+                           order_only=rule.order_only)
         else:
             return DummyReq(trgt, requires)
     else:
@@ -305,8 +310,8 @@ class HierReq(Req):
         max_usts = of_non_nan(max, (preq.check_uptodate()
                                     for preq in self.requires))
         if not self.trgt_exists():
-            LOG.debug(("since {self.trgt!r} does not exist, flagging {self!s} "
-                       "as not up-to-date").format(self=self))
+            LOG.debug(("since {self.trgt!r} does not exist, flagging "
+                       "{self!s} as not up-to-date").format(self=self))
             self.uptodate = False
             if max_usts:
                 return max_usts
@@ -445,12 +450,24 @@ class DummyReq(HierReq):
 
 
 def make(trgt, rules, env={}, **kwargs):
-    """Construct the dependency graph and run it."""
+    """Construct the dependency graph rooted at trgt and run it."""
     for rule in rules:
         rule.update_env(env)
     root_req = make_req(trgt, rules)
     root_req.check_uptodate()
     root_req.run(**kwargs)
+
+def make_multi(trgts, rules, env={}, **kwargs):
+    """Make a temporary rule which covers all targets and run it.
+
+    Because of this method, having a target named "multi_rule" will
+    interfere with constructing multiple targets
+
+    """
+    tmp_rule_trgt = r"multi_rule"
+    tmp_rule = Rule(tmp_rule_trgt, trgts)
+    rules += [tmp_rule]
+    make(tmp_rule_trgt, rules, env, **kwargs)
 
 
 def maker(rules):
@@ -507,13 +524,13 @@ def maker(rules):
 
     if len(args) == 1:
         target = args[0]
+        make(target, rules, env=dict(opts.env_items), execute=opts.execute)
     elif len(args) == 0:
-        # If no target specified, use the first target.  This will not take
-        # into account environmental variables passed with the '-V' flag.
         target = rules[0].trgt_pattern
+        make(target, rules, env=dict(opts.env_items), execute=opts.execute)
     else:
-        ValueError("Wrong number of positional arguments passed to pymake.")
-    make(target, rules, env=dict(opts.env_items), execute=opts.execute)
+        make_multi(args, rules, env=dict(opts.env_items),
+                   execute=opts.execute)
 
 
 def test():
