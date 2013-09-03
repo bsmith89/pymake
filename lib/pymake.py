@@ -343,13 +343,14 @@ class HierReq(Req):
                                   "for this class, which is therefore not "
                                   "a functioning HierReq subclass.")
 
-    def run(self, err_event=None, **kwargs):
+    def run(self, parallel=True, **kwargs):
         """Run, recursively, the requirement and all of its prerequisites.
 
         Requirements which are already up-to-date are not run and neither are
         their prerequisites.
 
         """
+        kwargs['parallel'] = parallel
         self.run_lock.acquire()
         if self.uptodate:
             LOG.info("{self!s} already up-to-date".format(self=self))
@@ -362,20 +363,37 @@ class HierReq(Req):
         else:
             LOG.debug("attempting to run {self!s}".format(self=self))
             if self.requires:
-                LOG.debug("running all preqs of {self!s}".format(self=self))
-                preq_threads = []
-                for preq in self.requires:
-                    thread = threading.Thread(target=preq.run, kwargs=kwargs)
-                    preq_threads += [thread]
-                    thread.start()
-                for preq, thread in zip(self.requires, preq_threads):
-                    thread.join()
-                    if preq.err_event.is_set():
-                        LOG.critical("preq: {preq!s} had an error; exiting.".\
-                                     format(preq=preq))
-                        self.err_event.set()
-                        self.run_lock.release()
-                        return
+                if parallel:
+                    LOG.debug("running all preqs of {self!s} in parallel".\
+                            format(self=self))
+                    preq_threads = []
+                    for preq in self.requires:
+                        thread = threading.Thread(target=preq.run,
+                                                  kwargs=kwargs)
+                        preq_threads += [thread]
+                        thread.start()
+                    for preq, thread in zip(self.requires, preq_threads):
+                        thread.join()
+                        if preq.err_event.is_set():
+                            LOG.critical(("preq: {preq!s} had an error; "
+                                          "exiting.").format(preq=preq))
+                            self.err_event.set()
+                            self.run_lock.release()
+                            return
+                else:
+                    LOG.debug("running all preqs of {self!s} in series".\
+                            format(self=self))
+                    for preq in self.requires:
+                        thread = threading.Thread(target=preq.run,
+                                                  kwargs=kwargs)
+                        thread.start()
+                        thread.join()
+                        if preq.err_event.is_set():
+                            LOG.critical(("preq: {preq!s} had an error; "
+                                          "exiting.").format(preq=preq))
+                            self.err_event.set()
+                            self.run_lock.release()
+                            return
         LOG.debug("calling {self!s}.do()".format(self=self))
         self.do(**kwargs)
         self.done = True
@@ -524,10 +542,12 @@ def maker(rules):
 
     if len(args) == 1:
         target = args[0]
-        make(target, rules, env=dict(opts.env_items), execute=opts.execute)
+        make(target, rules, env=dict(opts.env_items), execute=opts.execute,
+             parallel=opts.parallel)
     elif len(args) == 0:
         target = rules[0].trgt_pattern
-        make(target, rules, env=dict(opts.env_items), execute=opts.execute)
+        make(target, rules, env=dict(opts.env_items), execute=opts.execute,
+             parallel=opts.parallel)
     else:
         make_multi(args, rules, env=dict(opts.env_items),
                    execute=opts.execute)
@@ -548,7 +568,7 @@ def test():
     requirement = make_req("all", rules)
     requirement.check_uptodate()
     requirement.run(execute=True)
-    pass
+    pass  # Breakpoint
 
 if __name__ == '__main__':
     test()
