@@ -125,7 +125,7 @@ def backup(path, append="~", prepend="", on_fail=None):
         new_exists = os.path.exists(path)
         if original_exists:
             os.rename(backup_path, path)
-        elif new_exists and else_on_fail:
+        elif new_exists and on_fail:
             on_fail(path)
         raise err
     else:
@@ -153,6 +153,8 @@ def make_req(trgt, rules):
     Will fill the requirements of trgt recursively.
 
     """
+    if trgt in Req.instances:
+        return Req.instances[trgt]
     rule, remaining = extract_rule(trgt, rules)
     if rule:
         requires = [make_req(preq, remaining)
@@ -184,7 +186,8 @@ class Req():
         return "{self.__class__.__name__}({self.trgt!r})".format(self=self)
 
     def __str__(self):
-        return "{self.__class__.__name__}({self.trgt!r})".format(self=self)
+##        return "{self.__class__.__name__}({self.trgt!r})".format(self=self)
+        return Req.__repr__(self)
 
     def formatted(self):
         return self.__str__()
@@ -272,6 +275,7 @@ class HierReq(Req):
         super(HierReq, self).__init__(trgt)
         self.requires = requires
         self.uptodate = False
+        self.done = False
         self.run_lock = threading.Lock()
 
     def __repr__(self):
@@ -297,18 +301,27 @@ class HierReq(Req):
         they are newer than *trgt*, or if neither upstream requirements
         nor *trgt* exist.
 
+        TODO: Refactor
         """
         if self.uptodate:
-            LOG.debug(("{self!s} is flagged up-to-date and will not be, "
+            LOG.debug(("{self!s} is flagged up-to-date and will not be "
                       "re-checked.").format(self=self))
             # By definition, if the requirement is uptodate than its
             # timestamp is the largest.
-            return self.last_update()
+            if not self.order_only:
+                return self.last_update()
+            else:
+                return self.max_usts
         LOG.debug("determining if {self!s} is up-to-date".\
                   format(self=self))
         last_update = self.last_update()
         max_usts = of_non_nan(max, (preq.check_uptodate()
                                     for preq in self.requires))
+        if max_usts:  # Messy, but I have to save max_usts for later
+            self.max_usts = max_usts
+        else:
+            self.max_usts = float('nan')
+
         if not self.trgt_exists():
             LOG.debug(("since {self.trgt!r} does not exist, flagging "
                        "{self!s} as not up-to-date").format(self=self))
@@ -321,15 +334,21 @@ class HierReq(Req):
             LOG.debug(("since {self.trgt!r} exists, and no preqs exist, "
                         "flagging {self!s} as up-to-date").format(self=self))
             self.uptodate = True
-            return last_update
+            if not self.order_only:
+                return last_update
+            else:
+                return float('nan')
         elif last_update > max_usts:
             LOG.debug(("{self.trgt!r} is newer than all preqs; flagging "
                        "{self!s} as up-to-date").format(self=self))
             self.uptodate = True
-            return last_update
+            if not self.order_only:
+                return last_update
+            else:
+                return max_usts
         elif last_update <= max_usts:
-            LOG.debug(("{self.trgt!r} is older ({}) than all preqs (max={}); "
-                       "flagging {self!s} as uptodate").\
+            LOG.debug(("{self.trgt!r} is older ({}) than at least one "
+                       "preq (max={}); flagging {self!s} as not up-to-date").\
                      format(last_update, max_usts, self=self))
             self.uptodate = False
             return max_usts
@@ -352,12 +371,17 @@ class HierReq(Req):
         """
         kwargs['parallel'] = parallel
         self.run_lock.acquire()
-        if self.uptodate:
-            LOG.info("{self!s} already up-to-date".format(self=self))
+        if self.done:
+            LOG.debug("{self!s} already done".format(self=self))
+            self.run_lock.release()
+            return
+        elif self.uptodate:
+            LOG.debug("{self!s} already up-to-date".format(self=self))
+            self.done = True
             self.run_lock.release()
             return
         elif self.err_event.is_set():
-            LOG.debug("{self!s had an error".format(self=self))
+            LOG.debug("{self!s} had an error".format(self=self))
             self.run_lock.release()
             return
         else:
@@ -365,13 +389,16 @@ class HierReq(Req):
             if self.requires:
                 if parallel:
                     LOG.debug("running all preqs of {self!s} in parallel".\
-                            format(self=self))
+                              format(self=self))
                     preq_threads = []
                     for preq in self.requires:
                         thread = threading.Thread(target=preq.run,
                                                   kwargs=kwargs)
                         preq_threads += [thread]
                         thread.start()
+                        LOG.debug(("{self!s} spawned {thread.name} for "
+                                   "{preq!s}").\
+                                  format(self=self, thread=thread, preq=preq))
                     for preq, thread in zip(self.requires, preq_threads):
                         thread.join()
                         if preq.err_event.is_set():
@@ -387,6 +414,8 @@ class HierReq(Req):
                         thread = threading.Thread(target=preq.run,
                                                   kwargs=kwargs)
                         thread.start()
+                        LOG.debug("{self!s} spawned {thread.name}".\
+                                  format(self=self, thread=thread))
                         thread.join()
                         if preq.err_event.is_set():
                             LOG.critical(("preq: {preq!s} had an error; "
@@ -394,16 +423,16 @@ class HierReq(Req):
                             self.err_event.set()
                             self.run_lock.release()
                             return
-        LOG.debug("calling {self!s}.do()".format(self=self))
-        self.do(**kwargs)
-        self.done = True
-        if self.err_event.is_set():
-            LOG.critical("{self!s} had an error; exiting".format(self=self))
+            LOG.debug("calling {self!s}.do() {obj}".format(self=self, obj=id(self)))
+            self.do(**kwargs)
+            if self.err_event.is_set():
+                LOG.critical("{self!s} had an error; exiting".format(self=self))
+                self.run_lock.release()
+                return
+            self.done = True
+            LOG.debug("{self!s} done".format(self=self))
             self.run_lock.release()
             return
-        LOG.debug("{self!s} done".format(self=self))
-        self.run_lock.release()
-        return
 
 
 class TaskReq(HierReq, FileReq):
@@ -464,7 +493,7 @@ class DummyReq(HierReq):
         return float('nan')
 
     def do(self, **kwargs):
-        LOG.info("finished {self.trgt!r}".format(self=self))
+        LOG.info("**finished {self.trgt!r}**".format(self=self))
 
 
 def make(trgt, rules, env={}, **kwargs):
@@ -478,11 +507,11 @@ def make(trgt, rules, env={}, **kwargs):
 def make_multi(trgts, rules, env={}, **kwargs):
     """Make a temporary rule which covers all targets and run it.
 
-    Because of this method, having a target named "multi_rule" will
+    Because of this method, having a target of the same name will
     interfere with constructing multiple targets
 
     """
-    tmp_rule_trgt = r"multi_rule"
+    tmp_rule_trgt = r"all targets"
     tmp_rule = Rule(tmp_rule_trgt, trgts)
     rules += [tmp_rule]
     make(tmp_rule_trgt, rules, env, **kwargs)
