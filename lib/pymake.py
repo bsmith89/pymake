@@ -261,7 +261,7 @@ def of_non_nan(func, iterable):
     if non_nan_vals:
         return func(non_nan_vals)
     else:
-        return None
+        return float('nan')
 
 
 class HierReq(Req):
@@ -294,6 +294,7 @@ class HierReq(Req):
             out_string += '\n'.join(["\n  |REQUIRES|"] + req_strings)
         return out_string
 
+
     def check_uptodate(self):
         """Determine if the requirement needs to be updated.
 
@@ -301,55 +302,44 @@ class HierReq(Req):
         they are newer than *trgt*, or if neither upstream requirements
         nor *trgt* exist.
 
-        TODO: Refactor
         """
         if self.uptodate:
             LOG.debug(("{self!s} is flagged up-to-date and will not be "
-                      "re-checked.").format(self=self))
-            # By definition, if the requirement is uptodate than its
-            # timestamp is the largest.
+                       "re-checked.").format(self=self))
             if not self.order_only:
                 return self.last_update()
             else:
-                return self.max_usts
-        LOG.debug("determining if {self!s} is up-to-date".\
-                  format(self=self))
+                return self._cached_max_usts
         last_update = self.last_update()
-        max_usts = of_non_nan(max, (preq.check_uptodate()
-                                    for preq in self.requires))
-        if max_usts:  # Messy, but I have to save max_usts for later
-            self.max_usts = max_usts
-        else:
-            self.max_usts = float('nan')
-
+        self._cached_max_usts = max_usts = \
+                of_non_nan(max, (preq.check_uptodate()
+                                  for preq in self.requires))
         if not self.trgt_exists():
             LOG.debug(("since {self.trgt!r} does not exist, flagging "
                        "{self!s} as not up-to-date").format(self=self))
             self.uptodate = False
-            if max_usts:
-                return max_usts
-            else:
-                return float('nan')
-        elif not max_usts:
+            return max_usts
+        elif math.isnan(max_usts):
             LOG.debug(("since {self.trgt!r} exists, and no preqs exist, "
-                        "flagging {self!s} as up-to-date").format(self=self))
+                       "flagging {self!s} as up-to-date").format(self=self))
             self.uptodate = True
             if not self.order_only:
                 return last_update
             else:
-                return float('nan')
+                return max_usts
         elif last_update > max_usts:
-            LOG.debug(("{self.trgt!r} is newer than all preqs; flagging "
-                       "{self!s} as up-to-date").format(self=self))
+            LOG.debug(("{self.trgt!r} is newer than all preqs; "
+                        "flagging {self!s} as up-to-date.").format(self=self))
             self.uptodate = True
             if not self.order_only:
                 return last_update
             else:
                 return max_usts
         elif last_update <= max_usts:
-            LOG.debug(("{self.trgt!r} is older ({}) than at least one "
-                       "preq (max={}); flagging {self!s} as not up-to-date").\
-                     format(last_update, max_usts, self=self))
+            LOG.debug(("{self.trgt!r} is not newer ({}) than at least "
+                       "one preq (max={}); flagging {self!s} as not "
+                       "up-to-date.").\
+                      format(last_update, max_usts, self=self))
             self.uptodate = False
             return max_usts
         else:
@@ -423,10 +413,12 @@ class HierReq(Req):
                             self.err_event.set()
                             self.run_lock.release()
                             return
-            LOG.debug("calling {self!s}.do() {obj}".format(self=self, obj=id(self)))
+            LOG.debug("Doing {self!s} (id={obj})".\
+                      format(self=self, obj=id(self)))
             self.do(**kwargs)
             if self.err_event.is_set():
-                LOG.critical("{self!s} had an error; exiting".format(self=self))
+                LOG.critical("{self!s} had an error; exiting".\
+                             format(self=self))
                 self.run_lock.release()
                 return
             self.done = True
