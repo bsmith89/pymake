@@ -454,7 +454,7 @@ class TaskReq(HierReq, FileReq):
         return out_string
 
 
-    def do(self, execute=True, **kwargs):
+    def do(self, execute=True, print_out=True, **kwargs):
         """Print and execute the recipe."""
         if self.order_only and self.trgt_exists():
             LOG.debug("order-only requirement; will not be executed")
@@ -469,7 +469,8 @@ class TaskReq(HierReq, FileReq):
                                             bufsize=4096)
                     for encoded_line in proc.stdout:
                         line = encoded_line.decode()
-                        LOG.info(line.rstrip("\n"))
+                        if print_out:
+                            LOG.info(line.rstrip("\n"))
                     if proc.wait() != 0:
                         self.err_event.set()
                         raise subprocess.CalledProcessError(proc.returncode,
@@ -527,6 +528,10 @@ def maker(rules):
                       help=("print recipes. "
                             "Increment the logging level by 1. "
                             "DEFAULT: verbosity level 1 ('INFO')"))
+    parser.add_option("-O", "--no-stdout", dest="print_out",
+                      action="store_false", default=True,
+                      help=("don't print stdout and stderr from processes. "
+                            "DEFAULT: print"))
     parser.add_option("-n", "--dry", action="store_false",
                       dest="execute", default=True,
                       help=("Dry run.  Don't execute the recipes. "
@@ -561,17 +566,16 @@ def maker(rules):
                                    logging.DEBUG][opts.verbose],
                             format="%(message)s")
 
+    make_opts = dict(env=dict(opts.env_items), execute=opts.execute,
+                     parallel=opts.parallel, print_out=opts.print_out)
     if len(args) == 1:
         target = args[0]
-        make(target, rules, env=dict(opts.env_items), execute=opts.execute,
-             parallel=opts.parallel)
+        make(target, rules, **make_opts)
     elif len(args) == 0:
         target = rules[0].trgt_pattern
-        make(target, rules, env=dict(opts.env_items), execute=opts.execute,
-             parallel=opts.parallel)
+        make(target, rules, **make_opts)
     else:
-        make_multi(args, rules, env=dict(opts.env_items),
-                   execute=opts.execute)
+        make_multi(args, rules, **make_opts)
 
 
 def test():
